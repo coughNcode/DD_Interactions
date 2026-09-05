@@ -1,0 +1,30 @@
+# DDI-Guard — Python dependencies
+# Install inside conda env "E" on Apple Silicon (arm64):
+#   conda activate E
+#   pip install -r requirements.txt
+#
+# Note: rdkit is best installed via conda-forge on M1:
+#   conda install -c conda-forge rdkit
+# torch + torch-geometric should be installed from pytorch.org wheels for arm64.
+
+# ── Core ML stack ──────────────────────────────────────────────────────────────
+torch>=2.0.0
+torch-geometric>=2.3.0
+rdkit>=2023.3.0            # install via conda-forge on Apple Silicon
+
+# ── Cheminformatics / ADMET ────────────────────────────────────────────────────
+admet-ai>=2.0.0
+PyTDC>=0.4.0
+
+# ── Data science ──────────────────────────────────────────────────────────────
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# ── Backend API (FastAPI + ASGI server) ───────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+
+# ── Frontend (existing Streamlit UI) ─────────────────────────────────────────
+streamlit>=1.30.0
