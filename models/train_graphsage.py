@@ -152,49 +152,88 @@ def train():
     )
     train_data, val_data, test_data = transform(graph_data)
 
-    # GPU detection — explicit report
+    # Device detection — explicit report (M1-aware, no CUDA check)
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        print(f"\nGPU available: {torch.cuda.get_device_name(0)} — using CUDA")
+        print(f"\nDevice: CUDA — {torch.cuda.get_device_name(0)}")
+    elif torch.backends.mps.is_built() and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("\nDevice: MPS (Apple Silicon M1) — torch.device('mps')")
+        print("NOTE: Some torch_geometric scatter ops may lack MPS kernels; will fall back to CPU if NotImplementedError is raised.")
     else:
         device = torch.device("cpu")
-        print("\nGPU NOT available — using CPU")
+        print("\nDevice: CPU (neither CUDA nor MPS available)")
 
-    model = DDIModel().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+    def _run_training(device):
+        """Inner training loop — lower LR, validate every epoch, save BEST checkpoint."""
+        nonlocal model, optimizer
+        # LR lowered 0.005 → 0.001 for smoother convergence
+        model = DDIModel().to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    train_data = train_data.to(device)
-    val_data   = val_data.to(device)
-    test_data  = test_data.to(device)
+        td = train_data.to(device)
+        vd = val_data.to(device)
 
-    print(f"\nTraining split:   {train_data.edge_label_index.shape[1]:,} edges")
-    print(f"Validation split: {val_data.edge_label_index.shape[1]:,} edges")
-    print(f"Test split:       {test_data.edge_label_index.shape[1]:,} edges")
-    print("\nStarting training (15 epochs)...")
+        print(f"\nActual device used for training: {device}")
+        print(f"LR: 0.001 | Epochs: 30 | Checkpoint: best val ROC-AUC")
+        print(f"Training split:   {td.edge_label_index.shape[1]:,} edges")
+        print(f"Validation split: {vd.edge_label_index.shape[1]:,} edges")
+        print(f"Test split:       {test_data.edge_label_index.shape[1]:,} edges")
+        print("\nStarting training (30 epochs, saving best val AUC checkpoint)...")
 
-    t0 = time.time()
-    for epoch in range(1, 16):
-        model.train()
-        optimizer.zero_grad()
-        pred = model(train_data.x, train_data.edge_index, train_data.edge_label_index)
-        loss = F.binary_cross_entropy(pred, train_data.edge_label.float())
-        loss.backward()
-        optimizer.step()
+        best_val_roc  = -1.0
+        best_epoch    = -1
+        best_state    = None
 
-        if epoch % 5 == 0 or epoch == 1:
+        t0 = time.time()
+        for epoch in range(1, 31):
+            # ── Train step ────────────────────────────────────────────────────
+            model.train()
+            optimizer.zero_grad()
+            pred = model(td.x, td.edge_index, td.edge_label_index)
+            loss = F.binary_cross_entropy(pred, td.edge_label.float())
+            loss.backward()
+            optimizer.step()
+
+            # ── Validate every epoch ──────────────────────────────────────────
             model.eval()
             with torch.no_grad():
-                val_pred = model(val_data.x, val_data.edge_index, val_data.edge_label_index)
-                val_roc  = roc_auc_score(val_data.edge_label.cpu(), val_pred.cpu())
+                val_pred = model(vd.x, vd.edge_index, vd.edge_label_index)
+                val_roc  = roc_auc_score(vd.edge_label.cpu(), val_pred.cpu())
+
+            # ── Track best ───────────────────────────────────────────────────
+            if val_roc > best_val_roc:
+                best_val_roc = val_roc
+                best_epoch   = epoch
+                # Deep-copy state dict to CPU so we keep it safe
+                best_state   = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
             elapsed = time.time() - t0
-            print(f"  Epoch {epoch:03d} | Loss: {loss:.4f} | Val ROC-AUC: {val_roc:.4f} | Elapsed: {elapsed:.1f}s")
+            marker = " ★ BEST" if epoch == best_epoch else ""
+            print(f"  Epoch {epoch:03d} | Loss: {loss:.4f} | Val ROC-AUC: {val_roc:.4f} | {elapsed:.1f}s{marker}")
 
-    total_time = time.time() - t0
-    print(f"\nTraining complete in {total_time:.1f}s")
+        total_time = time.time() - t0
+        print(f"\nTraining complete in {total_time:.1f}s")
+        print(f"Best checkpoint: Epoch {best_epoch:03d} | Val ROC-AUC = {best_val_roc:.4f}")
 
-    # Save
+        # Restore best weights into model so caller saves the best, not last
+        model.load_state_dict(best_state)
+
+    model = optimizer = None
+    try:
+        _run_training(device)
+    except NotImplementedError as e:
+        if device.type == "mps":
+            print(f"\n⚠️  MPS NotImplementedError: {e}")
+            print("   Falling back to device = torch.device('cpu') and restarting training.")
+            device = torch.device("cpu")
+            _run_training(device)
+        else:
+            raise
+
+    # Save BEST checkpoint (model.state_dict() was restored to best inside _run_training)
     torch.save(model.state_dict(), MODEL_PATH)
-    print(f"Model saved -> {MODEL_PATH}")
+    print(f"Best checkpoint saved → {MODEL_PATH}")
 
     # Verify reload
     print("\nVerifying saved checkpoint...")
